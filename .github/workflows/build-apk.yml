@@ -1,0 +1,50 @@
+name: Build EJHWO APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Grant execute for gradlew
+        run: |
+          if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
+
+      - name: Setup Gradle Wrapper (if missing)
+        run: |
+          if [ ! -f ./gradlew ]; then
+            gradle wrapper --gradle-version 8.2 || true
+          fi
+          # Fallback: generate wrapper via gradle install
+          if [ ! -f ./gradlew ]; then
+            curl -sL https://services.gradle.org/distributions/gradle-8.2-bin.zip -o /tmp/gradle.zip
+            sudo apt-get update -qq && sudo apt-get install -y -qq unzip >/dev/null
+            unzip -q /tmp/gradle.zip -d /tmp
+            /tmp/gradle-8.2/bin/gradle wrapper --gradle-version 8.2
+          fi
+          chmod +x ./gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: EJHWO-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
