@@ -2,9 +2,14 @@ package com.ejhwo.app;
 
 import android.annotation.SuppressLint;
 import android.app.DownloadManager;
+import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.view.View;
@@ -12,6 +17,7 @@ import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
 import android.webkit.URLUtil;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -26,13 +32,14 @@ import androidx.core.view.WindowCompat;
 
 /**
  * EJHWO WebView shell.
- * Back: history → exit confirm. APK download via DownloadManager.
+ * Offline custom page, back confirm, APK download via DownloadManager.
  */
 public class MainActivity extends AppCompatActivity {
 
     private WebView webView;
     private ProgressBar progress;
     private boolean exitDialogShowing = false;
+    private boolean showingOffline = false;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -68,17 +75,17 @@ public class MainActivity extends AppCompatActivity {
                 String host = uri.getHost() == null ? "" : uri.getHost();
                 String path = uri.getPath() == null ? "" : uri.getPath().toLowerCase();
 
-                // APK → external download / install flow
-                if (path.endsWith(".apk") || url.toLowerCase().contains(".apk")) {
+                // Offline retry scheme
+                if ("ejhwo".equalsIgnoreCase(uri.getScheme()) && "retry".equalsIgnoreCase(uri.getHost())) {
+                    reloadApp();
+                    return true;
+                }
+
+                if (url.endsWith(".apk") || path.endsWith(".apk")
+                        || (url.contains("drive.google.com") && url.contains("export=download"))) {
                     try {
-                        Intent i = new Intent(Intent.ACTION_VIEW, uri);
-                        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                        startActivity(i);
-                    } catch (Exception e) {
-                        try {
-                            startDownload(url, URLUtil.guessFileName(url, null, null));
-                        } catch (Exception ignored) {
-                        }
+                        startDownload(url, URLUtil.guessFileName(url, null, null));
+                    } catch (Exception ignored) {
                     }
                     return true;
                 }
@@ -97,12 +104,27 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
-                progress.setVisibility(View.VISIBLE);
+                if (!showingOffline) {
+                    progress.setVisibility(View.VISIBLE);
+                }
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 progress.setVisibility(View.GONE);
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (request != null && request.isForMainFrame()) {
+                    showOfflinePage();
+                }
+            }
+
+            @Override
+            @SuppressWarnings("deprecation")
+            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                showOfflinePage();
             }
         });
 
@@ -127,73 +149,127 @@ public class MainActivity extends AppCompatActivity {
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onProgressChanged(WebView view, int newProgress) {
+                if (showingOffline) {
+                    progress.setVisibility(View.GONE);
+                    return;
+                }
                 progress.setProgress(newProgress);
                 progress.setVisibility(newProgress >= 100 ? View.GONE : View.VISIBLE);
             }
         });
 
-        String url = getString(R.string.app_url);
         if (savedInstanceState == null) {
-            webView.loadUrl(url);
+            if (isOnline()) {
+                webView.loadUrl(getString(R.string.app_url));
+            } else {
+                showOfflinePage();
+            }
         }
 
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
-                handleAppBack();
+                if (showingOffline) {
+                    showExitConfirm();
+                    return;
+                }
+                if (webView != null && webView.canGoBack()) {
+                    webView.goBack();
+                } else {
+                    showExitConfirm();
+                }
             }
         });
     }
 
-    private void startDownload(String url, String fileName) {
-        DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
-        req.setMimeType("application/vnd.android.package-archive");
-        String cookies = CookieManager.getInstance().getCookie(url);
-        if (cookies != null) {
-            req.addRequestHeader("cookie", cookies);
-        }
-        req.addRequestHeader("User-Agent", webView.getSettings().getUserAgentString());
-        req.setDescription("EJHWO অ্যাপ আপডেট");
-        req.setTitle(fileName != null ? fileName : "ejhwo-update.apk");
-        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-        req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,
-                fileName != null ? fileName : "ejhwo-update.apk");
-        DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
-        if (dm != null) {
-            dm.enqueue(req);
+    private boolean isOnline() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Network network = cm.getActiveNetwork();
+                if (network == null) return false;
+                NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+                return caps != null && (
+                        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                                || caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                                || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                );
+            } else {
+                android.net.NetworkInfo ni = cm.getActiveNetworkInfo();
+                return ni != null && ni.isConnected();
+            }
+        } catch (Exception e) {
+            return false;
         }
     }
 
-    private void handleAppBack() {
-        if (webView == null) {
-            showExitConfirm();
-            return;
+    private void reloadApp() {
+        showingOffline = false;
+        if (isOnline()) {
+            progress.setVisibility(View.VISIBLE);
+            webView.loadUrl(getString(R.string.app_url));
+        } else {
+            showOfflinePage();
+            Toast.makeText(this, "এখনো ইন্টারনেট নেই", Toast.LENGTH_SHORT).show();
         }
-        webView.evaluateJavascript(
-                "(function(){"
-                        + "try{"
-                        + "var d=document.querySelector('.side-drawer.open, .side-drawer.show, #sideDrawer.open');"
-                        + "if(d){if(typeof closeSideDrawer==='function'){closeSideDrawer();return 'drawer';}"
-                        + "d.classList.remove('open');d.classList.remove('show');return 'drawer';}"
-                        + "var m=document.querySelector('.modal-overlay.open, .modal-overlay.show, .confirm-overlay.open, #ejhwoUpdateModal.show');"
-                        + "if(m){m.classList.remove('open');m.classList.remove('show');m.style.display='none';return 'modal';}"
-                        + "if(typeof history!=='undefined' && history.state && history.state.ejhwo && history.length>1){"
-                        + "history.back();return 'hist';}"
-                        + "return 'none';"
-                        + "}catch(e){return 'none';}"
-                        + "})();",
-                value -> {
-                    String v = value == null ? "none" : value.replace("\"", "");
-                    if ("drawer".equals(v) || "modal".equals(v) || "hist".equals(v)) {
-                        return;
-                    }
-                    if (webView.canGoBack()) {
-                        webView.goBack();
-                    } else {
-                        showExitConfirm();
-                    }
-                }
-        );
+    }
+
+    private void showOfflinePage() {
+        showingOffline = true;
+        progress.setVisibility(View.GONE);
+        String html = ""
+                + "<!DOCTYPE html><html lang='bn'><head><meta charset='utf-8'/>"
+                + "<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1'/>"
+                + "<style>"
+                + "*{box-sizing:border-box;margin:0;padding:0}"
+                + "body{font-family:system-ui,-apple-system,'Noto Sans Bengali',sans-serif;"
+                + "min-height:100vh;min-height:100dvh;display:flex;align-items:center;justify-content:center;"
+                + "padding:28px 22px;background:linear-gradient(160deg,#f0fdfa 0%,#f8fafc 45%,#ecfdf5 100%);color:#0f172a}"
+                + ".card{width:100%;max-width:360px;text-align:center;"
+                + "background:rgba(255,255,255,.92);border:1px solid rgba(13,148,136,.14);"
+                + "border-radius:24px;padding:28px 22px 24px;"
+                + "box-shadow:0 20px 50px -18px rgba(15,23,42,.18)}"
+                + ".icon{width:72px;height:72px;margin:0 auto 16px;border-radius:20px;"
+                + "display:grid;place-items:center;"
+                + "background:linear-gradient(145deg,#ccfbf1,#99f6e4);"
+                + "color:#0f766e;box-shadow:0 10px 24px -8px rgba(13,148,136,.35)}"
+                + ".icon svg{width:36px;height:36px}"
+                + "h1{font-size:20px;font-weight:700;margin-bottom:8px;color:#0f766e}"
+                + "p{font-size:14px;line-height:1.55;color:#64748b;margin-bottom:22px}"
+                + ".btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;"
+                + "width:100%;padding:14px 18px;border:none;border-radius:14px;"
+                + "background:linear-gradient(135deg,#14b8a6,#0d9488);color:#fff;"
+                + "font-size:15px;font-weight:700;text-decoration:none;"
+                + "box-shadow:0 10px 24px -8px rgba(13,148,136,.5)}"
+                + ".btn:active{opacity:.92;transform:scale(.98)}"
+                + ".hint{margin-top:14px;font-size:12px;color:#94a3b8}"
+                + "</style></head><body>"
+                + "<div class='card'>"
+                + "<div class='icon'><svg fill='none' stroke='currentColor' stroke-width='1.8' "
+                + "stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'>"
+                + "<path d='M1 1l22 22M16.72 11.06A10.94 10.94 0 0112 13c-2.5 0-4.77-.9-6.53-2.4'/>"
+                + "<path d='M5 5a15.3 15.3 0 00-2.86 2.74M9.67 5.3A10.9 10.9 0 0112 5c1.9 0 3.7.47 5.28 1.3'/>"
+                + "<path d='M8.53 16.11A6 6 0 0112 17c1.1 0 2.12-.3 3-.82'/>"
+                + "<path d='M12 20h.01'/></svg></div>"
+                + "<h1>ইন্টারনেট সংযোগ নেই</h1>"
+                + "<p>EJHWO অ্যাপ চালাতে মোবাইল ডাটা বা Wi‑Fi চালু করুন। সংযোগ ফিরলে আবার চেষ্টা করুন।</p>"
+                + "<a class='btn' href='ejhwo://retry'>আবার চেষ্টা করুন</a>"
+                + "<div class='hint'>Wi‑Fi / মোবাইল ডাটা চালু আছে কিনা দেখুন</div>"
+                + "</div></body></html>";
+        webView.loadDataWithBaseURL("https://ejhwo.local/", html, "text/html", "UTF-8", null);
+    }
+
+    private void startDownload(String url, String fileName) {
+        DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
+        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+        req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,
+                fileName != null ? fileName : "ejhwo.apk");
+        req.setTitle(fileName != null ? fileName : "EJHWO");
+        String cookies = CookieManager.getInstance().getCookie(url);
+        if (cookies != null) req.addRequestHeader("Cookie", cookies);
+        DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+        if (dm != null) dm.enqueue(req);
     }
 
     private void showExitConfirm() {
@@ -219,7 +295,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
-        if (webView != null) {
+        if (webView != null && !showingOffline) {
             webView.saveState(outState);
         }
     }
@@ -227,7 +303,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onRestoreInstanceState(Bundle savedInstanceState) {
         super.onRestoreInstanceState(savedInstanceState);
-        if (webView != null) {
+        if (webView != null && !showingOffline) {
             webView.restoreState(savedInstanceState);
         }
     }
