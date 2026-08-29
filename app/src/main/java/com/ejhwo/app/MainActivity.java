@@ -17,6 +17,9 @@ import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
 import android.webkit.URLUtil;
 import android.webkit.WebChromeClient;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.activity.result.ActivityResultLauncher;
+import android.webkit.ValueCallback;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -41,6 +44,29 @@ public class MainActivity extends AppCompatActivity {
     private boolean exitDialogShowing = false;
     private boolean showingOffline = false;
 
+    /** WebView input type=file (profile photo etc.) */
+    private ValueCallback<Uri[]> filePathCallback;
+    private final ActivityResultLauncher<Intent> fileChooserLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                Uri[] results = null;
+                if (result.getResultCode() == RESULT_OK && result.getData() != null) {
+                    Intent data = result.getData();
+                    if (data.getClipData() != null) {
+                        int n = data.getClipData().getItemCount();
+                        results = new Uri[n];
+                        for (int i = 0; i < n; i++) {
+                            results[i] = data.getClipData().getItemAt(i).getUri();
+                        }
+                    } else if (data.getData() != null) {
+                        results = new Uri[]{ data.getData() };
+                    }
+                }
+                if (filePathCallback != null) {
+                    filePathCallback.onReceiveValue(results);
+                    filePathCallback = null;
+                }
+            });
+
     @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -63,6 +89,7 @@ public class MainActivity extends AppCompatActivity {
         s.setDisplayZoomControls(false);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setAllowFileAccess(true);
+        s.setAllowContentAccess(true);
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
@@ -155,6 +182,28 @@ public class MainActivity extends AppCompatActivity {
                 }
                 progress.setProgress(newProgress);
                 progress.setVisibility(newProgress >= 100 ? View.GONE : View.VISIBLE);
+            }
+
+            @Override
+            public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback,
+                                             FileChooserParams fileChooserParams) {
+                if (MainActivity.this.filePathCallback != null) {
+                    MainActivity.this.filePathCallback.onReceiveValue(null);
+                }
+                MainActivity.this.filePathCallback = filePathCallback;
+                try {
+                    Intent intent = fileChooserParams.createIntent();
+                    // Prefer images for profile photo
+                    if (intent.getType() == null || "*/*".equals(intent.getType())) {
+                        intent.setType("image/*");
+                    }
+                    fileChooserLauncher.launch(Intent.createChooser(intent, "ছবি নির্বাচন করুন"));
+                    return true;
+                } catch (Exception e) {
+                    MainActivity.this.filePathCallback = null;
+                    Toast.makeText(MainActivity.this, "ফাইল পিকার খোলা যায়নি", Toast.LENGTH_SHORT).show();
+                    return false;
+                }
             }
         });
 
