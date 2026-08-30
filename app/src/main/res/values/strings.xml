@@ -2,5 +2,5 @@
 <resources>
     <string name="app_name">EJHWO</string>
     <!-- v= versionCode — প্রতি নতুন APK রিলিজে বাড়ান; version.json-এর সাথে মিল রাখুন -->
-    <string name="app_url">https://ejhwo-1523f.web.app/?app=1&amp;v=4</string>
+    <string name="app_url">https://ejhwo-1523f.web.app/?app=1&amp;v=5</string>
 </resources>
